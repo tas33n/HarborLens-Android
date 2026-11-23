@@ -4,12 +4,18 @@ import android.content.Context;
 import android.webkit.CookieManager;
 import androidx.annotation.NonNull;
 import androidx.work.Worker;
+import androidx.work.Data;
 import androidx.work.WorkerParameters;
 import org.json.JSONArray;
 import java.io.IOException;
 
 public final class LookupWorker extends Worker {
     static final String STORE = "cpa-results", TAG = "cpa-lookup";
+    static final String CONTAINER_TAG = "container:";
+    private void reportProgress(int step, String detail) {
+        setProgressAsync(new Data.Builder().putInt("step", step).putString("detail", detail).build());
+    }
+
     public LookupWorker(@NonNull Context context, @NonNull WorkerParameters parameters) {
         super(context, parameters);
     }
@@ -22,12 +28,14 @@ public final class LookupWorker extends Worker {
             String cookie = CookieManager.getInstance().getCookie(Cpa.ROOT);
             String[] row;
             try {
-                row = Cpa.lookup(code, cookie);
+                row = Cpa.lookup(code, cookie, this::reportProgress);
             } catch (Cpa.Auth expired) {
                 if (!CpaAccount.configured(getApplicationContext())) throw expired;
+                reportProgress(0, "Renewing CPA session");
                 String renewed = CpaAccount.signIn(getApplicationContext(), cookie);
-                row = Cpa.lookup(code, renewed);
+                row = Cpa.lookup(code, renewed, this::reportProgress);
             }
+            if (isStopped()) return Result.failure();
             JSONArray json = new JSONArray();
             for (String value : row) json.put(value);
             return store.edit().putString(code, json.toString()).remove(code + "-error").commit()

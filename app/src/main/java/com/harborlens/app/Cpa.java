@@ -48,7 +48,8 @@ final class Cpa {
         return result;
     }
 
-    static String[] lookup(String code, String cookie) throws IOException, Review {
+    static String[] lookup(String code, String cookie, java.util.function.BiConsumer<Integer, String> progress) throws IOException, Review {
+        progress.accept(1, "Requesting container location");
         Document container = post("Report/mySearchContainerLocation", "", null, "containerLocation", code, "submit_login", "Search");
         if (!code.equalsIgnoreCase(field(container, "Container NO"))) throw new Review("Container missing or mismatched at CPA");
         if (!field(container, "Category").toUpperCase(Locale.ROOT).startsWith("EX")) throw new Review("CPA result is not export cargo");
@@ -59,6 +60,7 @@ final class Cpa {
         if (mlo.isEmpty()) throw new Review("CPA did not return the MLO");
         if (cookie == null || cookie.isEmpty()) throw new Auth("Sign in to CPA in Settings");
 
+        progress.accept(2, "Location found · Rotation " + rotation + " · MLO " + mlo);
         Document manifest = post("IgmViewController/myListSearch", "IgmViewController/myListSearch", cookie,
             "SearchCriteria", "Import", "Searchdata", rotation, "SearchD", "Go", "type", "GM");
         String vessel = "", voyage = "";
@@ -89,6 +91,7 @@ final class Cpa {
         String digits = number.group(1);
         String export = String.format(Locale.ROOT, "%0" + digits.length() + "dS", Integer.parseInt(digits) + 1);
 
+        progress.accept(3, "Vessel found · " + vessel + " · Export voyage " + export);
         Document report = post("Report/myAgentWiseVesselInfoReport", "Report/myAgentWiseVesselInfo", cookie,
             "ddl_imp_rot_no", rotation, "options", "html");
         String date = "";

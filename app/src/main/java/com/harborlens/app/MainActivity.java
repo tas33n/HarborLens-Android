@@ -112,6 +112,8 @@ public final class MainActivity extends ComponentActivity {
     private TextView duplicateMessage;
     private final java.util.concurrent.ExecutorService exportExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
     private final java.util.HashMap<String, String[]> resolved = new java.util.HashMap<>();
+    private final Map<String, androidx.work.WorkInfo> lookupWork = new java.util.HashMap<>();
+    private final ArrayList<DocumentStatus> documentStatuses = new ArrayList<>();
     private WorkManager work;
     private android.content.SharedPreferences results;
     private boolean torch, modal;
@@ -149,9 +151,19 @@ public final class MainActivity extends ComponentActivity {
         work = WorkManager.getInstance(this);
         load();
         render();
-        work.getWorkInfosByTagLiveData(LookupWorker.TAG).observe(this, ignored -> {
+        work.getWorkInfosByTagLiveData(LookupWorker.TAG).observe(this, jobs -> {
+            lookupWork.clear();
+            for (var job : jobs) {
+                if (job.getState().isFinished()) continue;
+                for (String tag : job.getTags()) {
+                    if (tag.startsWith(LookupWorker.CONTAINER_TAG)) {
+                        lookupWork.put(tag.substring(LookupWorker.CONTAINER_TAG.length()), job);
+                    }
+                }
+            }
             boolean changed = refreshMatches();
-            if (tab != 0 && !modal && cpaWeb == null && (changed || tab == 1)) render();
+            if (tab == 1) for (DocumentStatus status : documentStatuses) status.update();
+            if (tab == 2 && changed && !modal) render();
             if (tab == 0) updateCounts();
             if (changed) saveReports(null, false);
         });
@@ -215,33 +227,20 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void render() {
+        documentStatuses.clear();
         stopCamera();
         root = column();
         root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
             new int[] {0xfff8fcfc, BG, 0xffe1edf0}));
-        root.setPadding(dp(18), dp(12), dp(18), dp(10));
+        root.setPadding(0, 0, 0, dp(10));
         setContentView(root);
-        LinearLayout brand = new LinearLayout(this);
-        brand.setGravity(Gravity.CENTER_VERTICAL);
-        android.widget.ImageView logo = new android.widget.ImageView(this);
-        logo.setImageResource(R.mipmap.ic_bsca_launcher);
-        brand.addView(logo, new LinearLayout.LayoutParams(dp(36), dp(36)));
-        TextView brandName = text("BSCA SB Scan", 15, 0xff062b3a, true);
-        brandName.setPadding(dp(8), 0, 0, 0);
-        brand.addView(brandName);
-        root.addView(brand);
-        space(root, 10);
-        String[] headings = {"Scan documents", "Documents", "Shipping bill list", "Settings"};
-        root.addView(text(headings[tab], 34, INK, true));
-        space(root, 5);
-        String[] subtitles = {"Live OCR · works offline", "Review saved scans and CPA matches",
-            "Word and Excel reports", "CPA account and application details"};
-        root.addView(text(subtitles[tab], 13, MUTED, false));
-        space(root, 13);
+        addAppBar();
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(false);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout.LayoutParams scrollPlacement = new LinearLayout.LayoutParams(-1, 0, 1);
+        scrollPlacement.setMargins(dp(16), dp(12), dp(16), 0);
+        root.addView(scroll, scrollPlacement);
         content = column();
         scroll.addView(content);
         if (tab == 0) renderScanner();
@@ -251,6 +250,19 @@ public final class MainActivity extends ComponentActivity {
 
         space(root, 9);
         addFloatingNav();
+    }
+
+    private void addAppBar() {
+        String[] titles = {"Scan documents", "Documents", "Shipping bill list", "Settings"};
+        android.widget.Toolbar toolbar = new android.widget.Toolbar(this);
+        toolbar.setContentInsetsRelative(dp(16), dp(16));
+        toolbar.setTitle(titles[tab]);
+        toolbar.setTitleTextColor(INK);
+        toolbar.setBackgroundColor(0xfff8fcfc);
+        root.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(56)));
+        View divider = new View(this);
+        divider.setBackgroundColor(0xffdce8ea);
+        root.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
     }
 
     private void addFloatingNav() {
@@ -263,7 +275,7 @@ public final class MainActivity extends ComponentActivity {
         nav.setBackground(glass);
         nav.setElevation(dp(8));
         LinearLayout.LayoutParams placement = new LinearLayout.LayoutParams(-1, dp(65));
-        placement.setMargins(dp(3), 0, dp(3), dp(3));
+        placement.setMargins(dp(20), 0, dp(20), dp(3));
         root.addView(nav, placement);
         String[] labels = {"Scan", "Docs", "Reports", "Settings"};
         for (int i = 0; i < labels.length; i++) {
@@ -277,7 +289,13 @@ public final class MainActivity extends ComponentActivity {
                 android.content.res.ColorStateList.valueOf(0x24135669),
                 shape(i == tab ? TINT : Color.TRANSPARENT, 24), shape(Color.WHITE, 24)));
             item.addView(new NavGlyph(i, i == tab ? PURPLE : MUTED), new LinearLayout.LayoutParams(dp(23), dp(23)));
-            item.addView(text(labels[i], 11, i == tab ? PURPLE : MUTED, i == tab));
+            TextView label = text(labels[i], 11, i == tab ? PURPLE : MUTED, i == tab);
+            label.setGravity(Gravity.CENTER);
+            label.setMaxLines(1);
+            label.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams labelPlacement = new LinearLayout.LayoutParams(-1, -2);
+            labelPlacement.topMargin = dp(3);
+            item.addView(label, labelPlacement);
             item.setOnClickListener(view -> {
                 if (duplicate != null) { toast("Review the repeated document first"); return; }
                 if (index != tab) { tab = index; render(); }
@@ -667,7 +685,7 @@ public final class MainActivity extends ComponentActivity {
         var request = new OneTimeWorkRequest.Builder(LookupWorker.class)
             .setInputData(new Data.Builder().putString("container", code).build())
             .setConstraints(new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-            .addTag(LookupWorker.TAG).build();
+            .addTag(LookupWorker.TAG).addTag(LookupWorker.CONTAINER_TAG + code).build();
         work.enqueueUniqueWork("cpa-" + code, ExistingWorkPolicy.KEEP, request);
     }
 
@@ -696,22 +714,159 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void renderDocuments() {
-        content.addView(button("Retry CPA", false, this::retryPending));
+        LinearLayout actions = new LinearLayout(this);
+        content.addView(actions);
+        Button retry = button("Retry CPA", false, this::retryPending);
+        retry.setEnabled(!scans.isEmpty());
+        actions.addView(retry, new LinearLayout.LayoutParams(0, -2, 1));
+        Button clear = button("Remove all", false, this::confirmRemoveAll);
+        clear.setTextColor(RED);
+        clear.setEnabled(!scans.isEmpty());
+        LinearLayout.LayoutParams clearPlacement = new LinearLayout.LayoutParams(0, -2, 1);
+        clearPlacement.leftMargin = dp(8);
+        actions.addView(clear, clearPlacement);
         space(content, 8);
-        if (scans.isEmpty()) card().addView(text("Scanned documents will appear here.", 15, MUTED, false));
-        for (int i = scans.size() - 1; i >= 0; i--) {
-            Scan scan = scans.get(i);
-            LinearLayout row = card();
-            TextView number = text(scan.code, 19, INK, true);
-            number.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-            row.addView(number);
-            String[] sailing = resolved.get(scan.code);
-            row.addView(text(sailing == null ? results.getString(scan.code + "-error", "Waiting for CPA") :
-                sailing[1] + " · " + sailing[2] + " · " + sailing[3], 14, MUTED, false));
-            space(row, 7);
-            row.addView(button("Remove document", false, () -> confirmRemove(scan)));
-            space(content, 8);
+        if (scans.isEmpty()) {
+            card().addView(text("Scanned documents will appear here.", 15, MUTED, false));
+            return;
         }
+        content.addView(text(scans.size() + (scans.size() == 1 ? " document" : " documents") + " · Swipe for more columns",
+            12, MUTED, false));
+        space(content, 6);
+        android.widget.HorizontalScrollView horizontal = new android.widget.HorizontalScrollView(this);
+        horizontal.setBackground(shape(Color.WHITE, 12));
+        horizontal.setClipToOutline(true);
+        content.addView(horizontal, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout grid = column();
+        grid.setShowDividers(LinearLayout.SHOW_DIVIDER_MIDDLE);
+        grid.setDividerDrawable(gridDivider());
+        horizontal.addView(grid, new FrameLayout.LayoutParams(-2, -2));
+
+        String[] headings = {"SL", "Container no.", "CPA status / response", "Vessel",
+            "Voyage", "Rotation", "ETD", "MLO", "Action"};
+        int[] widths = {38, 124, 168, 132, 72, 96, 99, 62, 100};
+        LinearLayout header = gridRow(grid, 0xffdcecef);
+        for (int i = 0; i < headings.length; i++) {
+            TextView label = text(headings[i], 12, INK, true);
+            gridCell(header, label, widths[i], i == 0);
+        }
+        for (int i = 0; i < scans.size(); i++) {
+            Scan scan = scans.get(i);
+            LinearLayout row = gridRow(grid, i % 2 == 0 ? Color.WHITE : 0xfff6fafb);
+            gridCell(row, text(Integer.toString(i + 1), 12, MUTED, false), widths[0], true);
+            TextView number = text(scan.code, 13, INK, true);
+            number.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+            gridCell(row, number, widths[1], false);
+            LinearLayout statusCell = column();
+            gridCell(row, statusCell, widths[2], false);
+            TextView[] values = new TextView[5];
+            for (int j = 0; j < values.length; j++) {
+                values[j] = text("—", 13, INK, false);
+                gridCell(row, values[j], widths[j + 3], false);
+            }
+            DocumentStatus status = new DocumentStatus(scan.code, statusCell, values);
+            documentStatuses.add(status);
+            status.update();
+            Button remove = button("Remove", false, () -> confirmRemove(scan));
+            remove.setTextColor(RED);
+            remove.setTextSize(12);
+            remove.setContentDescription("Remove document " + (i + 1) + ", " + scan.code);
+            gridCell(row, remove, widths[8], true);
+        }
+    }
+
+    private GradientDrawable gridDivider() {
+        GradientDrawable line = new GradientDrawable();
+        line.setColor(0xffdce8ea);
+        line.setSize(dp(1), dp(1));
+        return line;
+    }
+
+    private LinearLayout gridRow(LinearLayout grid, int color) {
+        LinearLayout row = new LinearLayout(this);
+        row.setBackgroundColor(color);
+        row.setGravity(Gravity.TOP);
+        row.setShowDividers(LinearLayout.SHOW_DIVIDER_MIDDLE);
+        row.setDividerDrawable(gridDivider());
+        grid.addView(row, new LinearLayout.LayoutParams(-2, -2));
+        return row;
+    }
+
+    private void gridCell(LinearLayout row, View cell, int width, boolean centered) {
+        if (!(cell instanceof Button)) cell.setPadding(dp(8), dp(10), dp(8), dp(10));
+        if (centered && cell instanceof TextView) ((TextView) cell).setGravity(Gravity.CENTER);
+        row.addView(cell, new LinearLayout.LayoutParams(dp(width), -2));
+    }
+
+    private final class DocumentStatus {
+        private final String code;
+        private final TextView title, detail;
+        private final TextView[] values;
+        private final android.widget.ProgressBar bar;
+
+        DocumentStatus(String code, LinearLayout row, TextView[] values) {
+            this.code = code;
+            this.values = values;
+            title = text("", 14, INK, true);
+            title.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+            detail = text("", 12, MUTED, false);
+            bar = new android.widget.ProgressBar(MainActivity.this, null, android.R.attr.progressBarStyleHorizontal);
+            bar.setMax(3);
+            bar.setContentDescription("CPA lookup progress");
+            var placement = new LinearLayout.LayoutParams(-1, dp(4));
+            placement.topMargin = dp(5);
+            row.addView(title);
+            row.addView(bar, placement);
+            row.addView(detail);
+        }
+
+        void update() {
+            String[] sailing = resolved.get(code);
+            var job = lookupWork.get(code);
+            String failure = results.getString(code + "-error", "");
+            boolean running = job != null && job.getState() == androidx.work.WorkInfo.State.RUNNING;
+            bar.setVisibility(running && sailing == null ? View.VISIBLE : View.GONE);
+            if (sailing != null) {
+                title.setText("CPA matched");
+                detail.setText("Vessel and departure confirmed.");
+                int[] fields = {1, 2, 3, 4, 6};
+                for (int i = 0; i < values.length; i++) values[i].setText(sailing[fields[i]]);
+            } else if (running) {
+                int step = job.getProgress().getInt("step", 0);
+                String[] stages = {"Starting CPA lookup", "1 of 3 · Container location",
+                    "2 of 3 · Vessel and voyage", "3 of 3 · Departure date"};
+                title.setText(stages[Math.max(0, Math.min(step, 3))]);
+                bar.setIndeterminate(step == 0);
+                if (step > 0) bar.setProgress(step);
+                detail.setText(job.getProgress().getString("detail"));
+            } else if (job != null) {
+                title.setText("CPA lookup queued");
+                detail.setText(job.getRunAttemptCount() > 0
+                    ? "Waiting to retry after a connection or server error."
+                    : "Starts when a network connection is available.");
+            } else if (!failure.isEmpty()) {
+                title.setText("CPA lookup needs attention");
+                detail.setText(failure);
+            } else {
+                title.setText("Waiting for CPA");
+                detail.setText("Lookup has not started yet.");
+            }
+        }
+    }
+
+    private void confirmRemoveAll() {
+        int count = scans.size();
+        if (count == 0) return;
+        show(new AlertDialog.Builder(this).setTitle("Remove all scanned documents?")
+            .setMessage("This clears " + count + " saved scans and their counts from the current batch.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Remove all", (d, w) -> {
+                if (!storeScans(java.util.Collections.emptyList())) return;
+                scans.clear();
+                work.cancelAllWorkByTag(LookupWorker.TAG);
+                render();
+                saveReports(null, false);
+            }).create());
     }
 
     private void confirmRemove(Scan scan) {
@@ -969,14 +1124,18 @@ public final class MainActivity extends ComponentActivity {
         web.destroy();
     }
 
-    private void persist() {
+    private void persist() { storeScans(scans); }
+
+    private boolean storeScans(java.util.List<Scan> documents) {
         JSONArray data = new JSONArray();
         try {
-            for (Scan scan : scans) data.put(new JSONObject().put("code", scan.code));
-            if (!getPreferences(MODE_PRIVATE).edit().putString("scans", data.toString()).commit()) {
-                toast("Could not save the batch to this device");
-            }
-        } catch (JSONException invalid) { toast("Could not save the batch"); }
+            for (Scan scan : documents) data.put(new JSONObject().put("code", scan.code));
+            if (getPreferences(MODE_PRIVATE).edit().putString("scans", data.toString()).commit()) return true;
+        } catch (JSONException invalid) {
+            // Keep the current batch if serialization fails.
+        }
+        toast("Could not save the batch to this device");
+        return false;
     }
 
     private void load() {

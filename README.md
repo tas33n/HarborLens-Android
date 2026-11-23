@@ -32,10 +32,9 @@ template contains real company records and is bundled under app/src/main/assets.
 
 Push the project contents to the repository root, including .github. Every
 push builds, signs, and verifies both APKs. The workflow run's **Artifacts**
-section includes **BSCA-SB-Scan-APKs** for 14 days. A successful push to the
-default branch also creates a **GitHub Release** with both APKs and the
-subjects of the commits included in that push. Manual runs only upload
-artifacts. GitHub-hosted runners and Actions must be enabled for the repo.
+section includes **BSCA-SB-Scan-APKs** for 14 days. Every successful push or manual run also publishes a
+**GitHub Release** with both APKs. Push releases list the commits in that
+push, and manual releases list the selected commit. GitHub-hosted runners and Actions must be enabled for the repo.
 
 For release APKs that can update previous installs reliably, set these
 repository Actions secrets and reuse the same keystore across builds:
