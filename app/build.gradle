@@ -1,0 +1,25 @@
+plugins { id 'com.android.application' version '8.9.2' }
+
+android {
+    namespace 'com.harborlens.app'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'com.harborlens.app'
+        minSdk 23
+        targetSdk 34
+        versionCode 1
+        versionName '0.1'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.camera:camera-camera2:1.4.2'
+    implementation 'androidx.camera:camera-lifecycle:1.4.2'
+    implementation 'androidx.camera:camera-view:1.4.2'
+    implementation 'androidx.activity:activity:1.10.1'
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
+}
