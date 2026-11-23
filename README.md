@@ -1,39 +1,32 @@
-# HarborLens Android prototype
+# BSCA SB Scan
 
-Native Android app built with CameraX and bundled ML Kit Latin text recognition.
-Camera frames stay on the device. Align one container number in the center of
-the viewfinder. The app checks the ISO 6346 digit and requires two matching
-frames. Each accepted scan represents one document. Confirm another document
-explicitly if it uses a container already in the batch.
+BS Cargo Agency Ltd. shipping bill scanner for Android 10 and newer. CameraX
+and bundled ML Kit run offline. A green outline marks a new container code.
+A red outline marks a repeat. Both give haptic feedback. Count a repeat if it
+belongs to a separate document, or ignore it if the same document was scanned
+again. Each counted scan is recorded locally.
 
-The Documents tab stores scans on this phone and allows reviewing and removing
-them. CPA records are sample data. The sample identifier TCKU3877226 is assigned
-a demo sailing. Other identifiers start pending and can be assigned to a sample
-sailing manually. The Memo tab groups matched documents by sailing and saves a
-demo CSV using the Android document picker.
+In Settings, sign in on the CPA page, then tap Retry pending lookups. The app
+uses the CPA session cookie and Android WebView can offer password autofill.
+Expired sessions require signing in again. CPA lookups run with connectivity,
+and failures stay visible in Docs. The lookup uses the export container slot
+rotation, exact import rotation match, the import voyage's digits plus one
+with an S suffix, and the date from the vessel report's ETD field.
+
+Reports update in Downloads/BSCA SB Scan. Reports also offers Save Word copy,
+Save Excel copy and Share. Pending scans are excluded until matched. Reports
+start from the supplied company template. Existing rows and quantities are
+preserved, with new quantities added to unambiguous matching rows. New rows
+fill the template's blank rows and extend its table as needed. The attached
+template contains real company records and is bundled under app/src/main/assets.
 
 ## Build
 
-Open this folder in Android Studio with Android SDK Platform 35, Android SDK
-Build-Tools 35.0.0 and a JDK 17 or compatible Gradle JDK. The initial Gradle sync
-requires access to Gradle distributions, Google Maven and Maven Central.
+Push the project contents to the repository root, including .github. Each
+push runs Build Android APK. Once it succeeds, download BSCA-SB-Scan-debug-apk
+from the run's Artifacts and extract app-debug.apk.
 
-On Windows, from the project folder:
-
-    .\gradlew.bat :app:assembleDebug
-
-On macOS or Linux:
-
-    ./gradlew :app:assembleDebug
-
-Gradle outputs a debug-signed APK at app/build/outputs/apk/debug/app-debug.apk.
-The app supports Android 6.0 (API 23) and newer.
-
-## Build on GitHub
-
-Push the contents of this folder to the repository root so that
-`.github/workflows/android-apk.yml` and `gradlew` are both at the expected paths.
-The **Build Android APK** workflow runs on every push. You can also run it
-manually from the **Actions** tab. After a successful run, open its summary and
-download **HarborLens-debug-apk** under **Artifacts**. Extract `app-debug.apk`
-from the download to install it on an Android device.
+For a local build, use JDK 17 with Android SDK Platform 35 and Build Tools
+35.0.0. Run `./gradlew :app:assembleDebug` on Linux/macOS or
+`gradlew.bat :app:assembleDebug` on Windows. The APK is written to
+`app/build/outputs/apk/debug/app-debug.apk`.

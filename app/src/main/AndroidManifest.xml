@@ -1,7 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-feature android:name="android.hardware.camera.any" android:required="true" />
-    <application android:label="HarborLens" android:icon="@drawable/ic_harborlens" android:allowBackup="false"
+    <application android:label="BSCA SB Scan" android:usesCleartextTraffic="false" android:icon="@drawable/ic_harborlens" android:allowBackup="false"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
