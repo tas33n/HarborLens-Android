@@ -7,8 +7,8 @@ android {
         applicationId 'com.harborlens.app'
         minSdk 29
         targetSdk 34
-        versionCode providers.environmentVariable('BSCA_VERSION_CODE').map { it.toInteger() }.getOrElse(7)
-        versionName providers.environmentVariable('BSCA_VERSION_NAME').getOrElse('0.7')
+        versionCode providers.environmentVariable('BSCA_VERSION_CODE').map { it.toInteger() }.getOrElse(8)
+        versionName providers.environmentVariable('BSCA_VERSION_NAME').getOrElse('0.8')
     }
     buildFeatures { buildConfig true }
     compileOptions {

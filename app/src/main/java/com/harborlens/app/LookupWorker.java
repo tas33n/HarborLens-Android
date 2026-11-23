@@ -25,15 +25,15 @@ public final class LookupWorker extends Worker {
         if (code == null || !ContainerNumber.valid(code)) return Result.failure();
         var store = getApplicationContext().getSharedPreferences(STORE, Context.MODE_PRIVATE);
         try {
-            String cookie = CookieManager.getInstance().getCookie(Cpa.ROOT);
             String[] row;
             try {
-                row = Cpa.lookup(code, cookie, this::reportProgress);
+                row = Cpa.lookup(code, this::reportProgress);
             } catch (Cpa.Auth expired) {
                 if (!CpaAccount.configured(getApplicationContext())) throw expired;
                 reportProgress(0, "Renewing CPA session");
-                String renewed = CpaAccount.signIn(getApplicationContext(), cookie);
-                row = Cpa.lookup(code, renewed, this::reportProgress);
+                String cookie = CookieManager.getInstance().getCookie(Cpa.ROOT);
+                CpaAccount.signIn(getApplicationContext(), cookie);
+                row = Cpa.lookup(code, this::reportProgress);
             }
             if (isStopped()) return Result.failure();
             JSONArray json = new JSONArray();
@@ -41,12 +41,13 @@ public final class LookupWorker extends Worker {
             return store.edit().putString(code, json.toString()).remove(code + "-error").commit()
                 ? Result.success() : Result.retry();
         } catch (Cpa.Review review) {
-            store.edit().putString(code + "-error", review.getMessage()).commit();
+            if (!isStopped()) store.edit().putString(code + "-error", review.getMessage()).commit();
             return Result.failure();
         } catch (IOException unavailable) {
-            if (getRunAttemptCount() < 3) return Result.retry();
-            store.edit().putString(code + "-error", "CPA unavailable · tap Retry CPA").commit();
-            return Result.failure();
+            if (isStopped()) return Result.failure();
+            String message = unavailable.getMessage();
+            store.edit().putString(code + "-error", message == null ? "CPA network request failed" : message).commit();
+            return getRunAttemptCount() < 3 ? Result.retry() : Result.failure();
         }
     }
 }

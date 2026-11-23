@@ -681,12 +681,14 @@ public final class MainActivity extends ComponentActivity {
         else saveReports(null, false);
     }
 
-    private void queue(String code) {
+    private void queue(String code) { queue(code, ExistingWorkPolicy.KEEP); }
+
+    private void queue(String code, ExistingWorkPolicy policy) {
         var request = new OneTimeWorkRequest.Builder(LookupWorker.class)
             .setInputData(new Data.Builder().putString("container", code).build())
             .setConstraints(new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
             .addTag(LookupWorker.TAG).addTag(LookupWorker.CONTAINER_TAG + code).build();
-        work.enqueueUniqueWork("cpa-" + code, ExistingWorkPolicy.KEEP, request);
+        work.enqueueUniqueWork("cpa-" + code, policy, request);
     }
 
     private boolean refreshMatches() {
@@ -705,10 +707,12 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void retryPending() {
-        for (Scan scan : scans) {
-            if (resolved.containsKey(scan.code)) continue;
-            results.edit().remove(scan.code + "-error").apply();
-            queue(scan.code);
+        Set<String> pending = new LinkedHashSet<>();
+        for (Scan scan : scans) if (!resolved.containsKey(scan.code)) pending.add(scan.code);
+        for (String code : pending) {
+            var active = lookupWork.get(code);
+            if (active != null && active.getState() == androidx.work.WorkInfo.State.RUNNING) continue;
+            queue(code, ExistingWorkPolicy.REPLACE);
         }
         render();
     }
@@ -842,7 +846,7 @@ public final class MainActivity extends ComponentActivity {
             } else if (job != null) {
                 title.setText("CPA lookup queued");
                 detail.setText(job.getRunAttemptCount() > 0
-                    ? "Waiting to retry after a connection or server error."
+                    ? (failure.isEmpty() ? "Waiting for the next attempt." : failure + "\nRetry scheduled.")
                     : "Starts when a network connection is available.");
             } else if (!failure.isEmpty()) {
                 title.setText("CPA lookup needs attention");

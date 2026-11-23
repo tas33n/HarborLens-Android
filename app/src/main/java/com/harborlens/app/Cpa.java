@@ -31,37 +31,61 @@ final class Cpa {
         return !doc.select("form input[name=password]").isEmpty();
     }
 
-    private static Document post(String path, String ref, String cookie, String... fields) throws IOException, Review {
-        Connection request = Jsoup.connect(INDEX + path).referrer(ref.isEmpty() ? ROOT : INDEX + ref)
-            .header("Origin", "https://cpatos.gov.bd").method(Connection.Method.POST)
-            .timeout(12000).maxBodySize(2_000_000).followRedirects(false).ignoreHttpErrors(true).data(fields);
+    private static Document post(String stage, String path, String ref, String... fields) throws IOException, Review {
+        String url = INDEX + path;
+        var cookies = android.webkit.CookieManager.getInstance();
+        Connection request = Jsoup.connect(url).referrer(ref.isEmpty() ? ROOT : INDEX + ref)
+            .header("Origin", "https://cpatos.gov.bd")
+            .header("Accept", "text/html,application/xhtml+xml")
+            .method(Connection.Method.POST).timeout(25000).maxBodySize(2_000_000)
+            .followRedirects(false).ignoreHttpErrors(true).ignoreContentType(true).data(fields);
+        String cookie = cookies.getCookie(url);
         if (cookie != null && !cookie.isEmpty()) request.header("Cookie", cookie);
-        Connection.Response response = request.execute();
-        int status = response.statusCode();
-        if (status == 401 || status == 403 || (status >= 300 && status < 400)) {
-            throw new Auth("Sign in to CPA again");
+        Connection.Response response;
+        try {
+            response = request.execute();
+        } catch (java.net.SocketTimeoutException timeout) {
+            throw new IOException(stage + ": CPA timed out", timeout);
+        } catch (java.net.UnknownHostException dns) {
+            throw new IOException(stage + ": cannot resolve CPA hostname", dns);
+        } catch (javax.net.ssl.SSLException tls) {
+            throw new IOException(stage + ": HTTPS connection failed", tls);
+        } catch (IOException unavailable) {
+            throw new IOException(stage + ": connection failed (" + unavailable.getClass().getSimpleName() + ")", unavailable);
         }
-        if (status >= 500 || status == 429) throw new IOException("CPA temporarily unavailable");
-        if (status != 200) throw new Review("CPA returned HTTP " + status);
-        Document result = response.parse();
-        if (cookie != null && loginRequired(result)) throw new Auth("CPA session expired");
-        return result;
+        for (String update : response.headers("Set-Cookie")) cookies.setCookie(url, update);
+        if (!response.headers("Set-Cookie").isEmpty()) cookies.flush();
+
+        int status = response.statusCode();
+        if (status == 401 || status == 403) throw new Auth(stage + ": CPA denied access (HTTP " + status + ")");
+        if (status >= 300 && status < 400) {
+            String target = response.header("Location");
+            if (target != null && target.toLowerCase(Locale.ROOT).contains("/login")) {
+                throw new Auth(stage + ": CPA redirected to sign-in (HTTP " + status + ")");
+            }
+            throw new Review(stage + ": unexpected redirect (HTTP " + status + ")");
+        }
+        if (status >= 500 || status == 429) throw new IOException(stage + ": CPA returned HTTP " + status);
+        if (status != 200) throw new Review(stage + ": CPA returned HTTP " + status);
+        return response.parse();
     }
 
-    static String[] lookup(String code, String cookie, java.util.function.BiConsumer<Integer, String> progress) throws IOException, Review {
+    static String[] lookup(String code, java.util.function.BiConsumer<Integer, String> progress) throws IOException, Review {
         progress.accept(1, "Requesting container location");
-        Document container = post("Report/mySearchContainerLocation", "", null, "containerLocation", code, "submit_login", "Search");
-        if (!code.equalsIgnoreCase(field(container, "Container NO"))) throw new Review("Container missing or mismatched at CPA");
+        Document container = post("Container location", "Report/mySearchContainerLocation", "", "containerLocation", code, "submit_login", "Search");
+        if (!code.equalsIgnoreCase(field(container, "Container NO"))) {
+            if (loginRequired(container)) throw new Auth("Container location: CPA returned the sign-in form");
+            throw new Review("Container location: no matching container in the CPA response");
+        }
         if (!field(container, "Category").toUpperCase(Locale.ROOT).startsWith("EX")) throw new Review("CPA result is not export cargo");
         Matcher slot = SLOT.matcher(field(container, "Position / Location"));
         if (!slot.find()) throw new Review("No export vessel slot at CPA");
         String rotation = slot.group(1) + "/" + slot.group(2);
         String mlo = field(container, "MLO").split(",", 2)[0].trim();
         if (mlo.isEmpty()) throw new Review("CPA did not return the MLO");
-        if (cookie == null || cookie.isEmpty()) throw new Auth("Sign in to CPA in Settings");
 
         progress.accept(2, "Location found · Rotation " + rotation + " · MLO " + mlo);
-        Document manifest = post("IgmViewController/myListSearch", "IgmViewController/myListSearch", cookie,
+        Document manifest = post("Vessel and voyage", "IgmViewController/myListSearch", "IgmViewController/myListSearch",
             "SearchCriteria", "Import", "Searchdata", rotation, "SearchD", "Go", "type", "GM");
         String vessel = "", voyage = "";
         for (Element table : manifest.select("table")) {
@@ -85,14 +109,17 @@ final class Cpa {
                 voyage = nextVoy;
             }
         }
-        if (vessel.isEmpty()) throw new Review("No exact CPA vessel match. Check sign-in and rotation");
+        if (vessel.isEmpty()) {
+            if (loginRequired(manifest)) throw new Auth("Vessel and voyage: CPA returned the sign-in form");
+            throw new Review("Vessel and voyage: no match for rotation " + rotation);
+        }
         Matcher number = VOY.matcher(voyage);
         if (!number.matches()) throw new Review("Import voyage format needs review: " + voyage);
         String digits = number.group(1);
         String export = String.format(Locale.ROOT, "%0" + digits.length() + "dS", Integer.parseInt(digits) + 1);
 
         progress.accept(3, "Vessel found · " + vessel + " · Export voyage " + export);
-        Document report = post("Report/myAgentWiseVesselInfoReport", "Report/myAgentWiseVesselInfo", cookie,
+        Document report = post("Departure date", "Report/myAgentWiseVesselInfoReport", "Report/myAgentWiseVesselInfo",
             "ddl_imp_rot_no", rotation, "options", "html");
         String date = "";
         for (Element heading : report.select("h5")) {
@@ -110,7 +137,10 @@ final class Cpa {
                 }
             }
         }
-        if (date.isEmpty()) throw new Review("CPA ETD missing. Check sign-in or vessel report");
+        if (date.isEmpty()) {
+            if (loginRequired(report)) throw new Auth("Departure date: CPA returned the sign-in form");
+            throw new Review("Departure date: CPA did not return an ETD for rotation " + rotation);
+        }
         return new String[]{"", vessel, export, rotation, date, "1", mlo};
     }
 
