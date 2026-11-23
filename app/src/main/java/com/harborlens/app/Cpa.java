@@ -19,8 +19,16 @@ final class Cpa {
     private static final Pattern SLOT = Pattern.compile("(?i)\\bSlot\\s*:\\s*V-[A-Z0-9-]*?(20[0-9]{2})([0-9]{4})[0-9]-(?=[0-9])");
     private static final Pattern VOY = Pattern.compile("(?i)^[A-Z .-]*([0-9]{1,8})N$");
 
-    static final class Review extends Exception {
+    static class Review extends Exception {
         Review(String message) { super(message); }
+    }
+
+    static final class Auth extends Review {
+        Auth(String message) { super(message); }
+    }
+
+    static boolean loginRequired(Document doc) {
+        return !doc.select("form input[name=password]").isEmpty();
     }
 
     private static Document post(String path, String ref, String cookie, String... fields) throws IOException, Review {
@@ -31,11 +39,13 @@ final class Cpa {
         Connection.Response response = request.execute();
         int status = response.statusCode();
         if (status == 401 || status == 403 || (status >= 300 && status < 400)) {
-            throw new Review("Sign in to CPA again");
+            throw new Auth("Sign in to CPA again");
         }
         if (status >= 500 || status == 429) throw new IOException("CPA temporarily unavailable");
         if (status != 200) throw new Review("CPA returned HTTP " + status);
-        return response.parse();
+        Document result = response.parse();
+        if (cookie != null && loginRequired(result)) throw new Auth("CPA session expired");
+        return result;
     }
 
     static String[] lookup(String code, String cookie) throws IOException, Review {
@@ -47,7 +57,7 @@ final class Cpa {
         String rotation = slot.group(1) + "/" + slot.group(2);
         String mlo = field(container, "MLO").split(",", 2)[0].trim();
         if (mlo.isEmpty()) throw new Review("CPA did not return the MLO");
-        if (cookie == null || cookie.isEmpty()) throw new Review("Sign in to CPA in Settings");
+        if (cookie == null || cookie.isEmpty()) throw new Auth("Sign in to CPA in Settings");
 
         Document manifest = post("IgmViewController/myListSearch", "IgmViewController/myListSearch", cookie,
             "SearchCriteria", "Import", "Searchdata", rotation, "SearchD", "Go", "type", "GM");

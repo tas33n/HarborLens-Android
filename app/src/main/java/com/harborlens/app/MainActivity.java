@@ -5,6 +5,13 @@ import android.content.ClipData;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.graphics.RectF;
+import android.graphics.Path;
+import android.widget.CheckBox;
+import java.util.ArrayDeque;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
 import android.provider.MediaStore;
 import android.webkit.CookieManager;
 import android.webkit.WebView;
@@ -71,8 +78,8 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 
 public final class MainActivity extends ComponentActivity {
-    private static final int INK = 0xff241d37, MUTED = 0xff625a73, BG = 0xfff8f5ff;
-    private static final int PURPLE = 0xff5438a8, TINT = 0xffeae0ff;
+    private static final int INK = 0xff102e38, MUTED = 0xff536a71, BG = 0xffeef4f5;
+    private static final int PURPLE = 0xff135669, TINT = 0xffdcecef;
     private static final String SAMPLE = "TCKU3877226";
     private static final String BASE = "Shipping Bill List";
     private static final int GREEN = 0xff147d51, RED = 0xffcc2639;
@@ -90,7 +97,16 @@ public final class MainActivity extends ComponentActivity {
     private ProcessCameraProvider provider;
     private Camera camera;
     private int tab, generation, stableFrames, blankFrames;
-    private String candidate = "", latched = "", duplicate;
+    private String duplicate;
+    private final Set<String> latched = new LinkedHashSet<>();
+    private final java.util.HashMap<String, Integer> misses = new java.util.HashMap<>();
+    private Set<String> candidate = java.util.Collections.emptySet();
+    private final ArrayDeque<String> repeatQueue = new ArrayDeque<>();
+    private LinkedHashMap<String, RectF> multi = new LinkedHashMap<>();
+    private LinearLayout capturePanel;
+    private TextView captureMessage;
+    private WebView cpaWeb;
+    private final java.util.concurrent.ExecutorService accountExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
     private Reticle reticle;
     private LinearLayout duplicatePanel;
     private TextView duplicateMessage;
@@ -121,13 +137,21 @@ public final class MainActivity extends ComponentActivity {
         getWindow().setNavigationBarColor(BG);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
             | (android.os.Build.VERSION.SDK_INT >= 26 ? View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR : 0));
+        getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() {
+                if (cpaWeb != null) closeWeb(false);
+                else if (duplicate != null) toast("Review the repeated document first");
+                else if (tab != 0) { tab = 0; render(); }
+                else { setEnabled(false); getOnBackPressedDispatcher().onBackPressed(); }
+            }
+        });
         results = getSharedPreferences(LookupWorker.STORE, MODE_PRIVATE);
         work = WorkManager.getInstance(this);
         load();
         render();
         work.getWorkInfosByTagLiveData(LookupWorker.TAG).observe(this, ignored -> {
             boolean changed = refreshMatches();
-            if (tab != 0 && !modal && (changed || tab == 1)) render();
+            if (tab != 0 && !modal && cpaWeb == null && (changed || tab == 1)) render();
             if (tab == 0) updateCounts();
             if (changed) saveReports(null, false);
         });
@@ -141,6 +165,8 @@ public final class MainActivity extends ComponentActivity {
         stopCamera();
         recognizer.close();
         exportExecutor.shutdown();
+        accountExecutor.shutdown();
+        if (cpaWeb != null) cpaWeb.destroy();
         super.onDestroy();
     }
 
@@ -191,15 +217,26 @@ public final class MainActivity extends ComponentActivity {
     private void render() {
         stopCamera();
         root = column();
-        root.setBackgroundColor(BG);
+        root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+            new int[] {0xfff8fcfc, BG, 0xffe1edf0}));
         root.setPadding(dp(18), dp(12), dp(18), dp(10));
         setContentView(root);
-        root.addView(text("BSCA SB Scan", 15, PURPLE, true));
+        LinearLayout brand = new LinearLayout(this);
+        brand.setGravity(Gravity.CENTER_VERTICAL);
+        android.widget.ImageView logo = new android.widget.ImageView(this);
+        logo.setImageResource(R.mipmap.ic_bsca_launcher);
+        brand.addView(logo, new LinearLayout.LayoutParams(dp(36), dp(36)));
+        TextView brandName = text("BSCA SB Scan", 15, 0xff062b3a, true);
+        brandName.setPadding(dp(8), 0, 0, 0);
+        brand.addView(brandName);
+        root.addView(brand);
         space(root, 10);
         String[] headings = {"Scan documents", "Documents", "Shipping bill list", "Settings"};
         root.addView(text(headings[tab], 34, INK, true));
         space(root, 5);
-        root.addView(text("BS Cargo Agency Ltd.", 13, MUTED, false));
+        String[] subtitles = {"Live OCR · works offline", "Review saved scans and CPA matches",
+            "Word and Excel reports", "CPA account and application details"};
+        root.addView(text(subtitles[tab], 13, MUTED, false));
         space(root, 13);
 
         ScrollView scroll = new ScrollView(this);
@@ -212,20 +249,75 @@ public final class MainActivity extends ComponentActivity {
         else if (tab == 2) renderMemo();
         else renderSettings();
 
-        space(root, 10);
+        space(root, 9);
+        addFloatingNav();
+    }
+
+    private void addFloatingNav() {
         LinearLayout nav = new LinearLayout(this);
-        root.addView(nav);
+        nav.setPadding(dp(5), dp(4), dp(5), dp(4));
+        GradientDrawable glass = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+            new int[]{0xfaffffff, 0xe5f0f8f9, 0xf5ffffff});
+        glass.setCornerRadius(dp(30));
+        glass.setStroke(dp(1), 0xffffffff);
+        nav.setBackground(glass);
+        nav.setElevation(dp(8));
+        LinearLayout.LayoutParams placement = new LinearLayout.LayoutParams(-1, dp(65));
+        placement.setMargins(dp(3), 0, dp(3), dp(3));
+        root.addView(nav, placement);
         String[] labels = {"Scan", "Docs", "Reports", "Settings"};
         for (int i = 0; i < labels.length; i++) {
-            final int selected = i;
-            Button item = button(labels[i], i == tab, () -> {
-                if (duplicate != null) { toast("Choose Count document or Ignore first"); return; }
-                if (tab != selected) { tab = selected; render(); }
-            });
+            final int index = i;
+            LinearLayout item = column();
+            item.setGravity(Gravity.CENTER);
             item.setSelected(i == tab);
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(48), 1);
-            if (i > 0) params.leftMargin = dp(7);
-            nav.addView(item, params);
+            item.setContentDescription(labels[i] + (i == tab ? ", selected" : ""));
+            item.setFocusable(true);
+            item.setBackground(new android.graphics.drawable.RippleDrawable(
+                android.content.res.ColorStateList.valueOf(0x24135669),
+                shape(i == tab ? TINT : Color.TRANSPARENT, 24), shape(Color.WHITE, 24)));
+            item.addView(new NavGlyph(i, i == tab ? PURPLE : MUTED), new LinearLayout.LayoutParams(dp(23), dp(23)));
+            item.addView(text(labels[i], 11, i == tab ? PURPLE : MUTED, i == tab));
+            item.setOnClickListener(view -> {
+                if (duplicate != null) { toast("Review the repeated document first"); return; }
+                if (index != tab) { tab = index; render(); }
+            });
+            nav.addView(item, new LinearLayout.LayoutParams(0, -1, 1));
+        }
+    }
+
+    private final class NavGlyph extends View {
+        private final int icon, tint;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        NavGlyph(int icon, int tint) { super(MainActivity.this); this.icon = icon; this.tint = tint; }
+        @Override protected void onDraw(Canvas c) {
+            c.save();
+            c.scale(getWidth()/24f, getHeight()/24f);
+            paint.setColor(tint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeJoin(Paint.Join.ROUND);
+            paint.setStrokeWidth(1.8f);
+            if (icon == 0) {
+                Path path = new Path();
+                path.moveTo(3,8); path.lineTo(3,3); path.lineTo(8,3);
+                path.moveTo(16,3); path.lineTo(21,3); path.lineTo(21,8);
+                path.moveTo(21,16); path.lineTo(21,21); path.lineTo(16,21);
+                path.moveTo(8,21); path.lineTo(3,21); path.lineTo(3,16);
+                c.drawPath(path, paint);
+                c.drawLine(5,12,19,12,paint);
+            } else if (icon == 1) {
+                c.drawRoundRect(5,3,19,21,3,3,paint);
+                c.drawLine(8,9,16,9,paint); c.drawLine(8,13,16,13,paint); c.drawLine(8,17,13,17,paint);
+            } else if (icon == 2) {
+                c.drawRoundRect(3,4,21,20,3,3,paint);
+                c.drawLine(3,9,21,9,paint); c.drawLine(10,9,10,20,paint); c.drawLine(3,14,21,14,paint);
+            } else {
+                c.drawLine(3,6,21,6,paint); c.drawLine(3,12,21,12,paint); c.drawLine(3,18,21,18,paint);
+                paint.setStyle(Paint.Style.FILL);
+                c.drawCircle(8,6,2.7f,paint); c.drawCircle(16,12,2.7f,paint); c.drawCircle(10,18,2.7f,paint);
+            }
+            c.restore();
         }
     }
 
@@ -269,6 +361,17 @@ public final class MainActivity extends ComponentActivity {
         choices.addView(button("Ignore", false, () -> finishDuplicate(false)), new LinearLayout.LayoutParams(0, -2, 1));
         duplicatePanel.setVisibility(View.GONE);
         content.addView(duplicatePanel);
+        capturePanel = column();
+        capturePanel.setPadding(dp(12), dp(9), dp(12), dp(9));
+        capturePanel.setBackground(shape(TINT, 18));
+        captureMessage = text("", 14, PURPLE, true);
+        capturePanel.addView(captureMessage);
+        LinearLayout captureChoices = new LinearLayout(this);
+        capturePanel.addView(captureChoices);
+        captureChoices.addView(button("Capture one", false, () -> capture(false)), new LinearLayout.LayoutParams(0, -2, 1));
+        captureChoices.addView(button("Capture all", true, () -> capture(true)), new LinearLayout.LayoutParams(0, -2, 1));
+        capturePanel.setVisibility(View.GONE);
+        content.addView(capturePanel);
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             cameraMessage.setText("Enable the rear camera to scan");
             content.addView(button("Enable camera", true, () -> permission.launch(Manifest.permission.CAMERA)));
@@ -283,7 +386,7 @@ public final class MainActivity extends ComponentActivity {
         next.leftMargin = dp(8);
         actions.addView(button("Scan same again", false, () -> {
             if (duplicate != null) return;
-            if (ContainerNumber.valid(latched)) add(latched);
+            if (latched.size() == 1) add(latched.iterator().next());
             else toast("Scan a container first");
         }), next);
         space(content, 11);
@@ -310,8 +413,10 @@ public final class MainActivity extends ComponentActivity {
         if (provider != null) provider.unbindAll();
         camera = null;
         torch = false;
-        candidate = "";
-        latched = "";
+        candidate = java.util.Collections.emptySet();
+        latched.clear();
+        multi.clear();
+        misses.clear();
         stableFrames = 0;
         blankFrames = 0;
     }
@@ -359,7 +464,7 @@ public final class MainActivity extends ComponentActivity {
     @SuppressLint("UnsafeOptInUsageError")
     private void analyze(ImageProxy frame, int token) {
         android.media.Image image = frame.getImage();
-        if (token != generation || image == null || duplicate != null || modal || !hasWindowFocus()) {
+        if (token != generation || image == null || modal || !hasWindowFocus()) {
             frame.close();
             return;
         }
@@ -370,7 +475,7 @@ public final class MainActivity extends ComponentActivity {
         try {
             recognizer.process(InputImage.fromMediaImage(image, rotation))
                 .addOnSuccessListener(ContextCompat.getMainExecutor(this), result -> {
-                    if (token == generation && duplicate == null && !modal && hasWindowFocus()) recognize(result, source);
+                    if (token == generation && !modal && hasWindowFocus()) recognize(result, source);
                 })
                 .addOnFailureListener(ContextCompat.getMainExecutor(this), error -> {
                     if (token == generation) cameraMessage.setText("OCR unavailable · use manual entry");
@@ -386,9 +491,8 @@ public final class MainActivity extends ComponentActivity {
         OutputTransform target = preview.getOutputTransform();
         if (target == null) return;
         CoordinateTransform transform = new CoordinateTransform(source, target);
-        String hit = "";
-        RectF hitBounds = null;
-        double proximity = Double.MAX_VALUE;
+        LinkedHashMap<String, RectF> hits = new LinkedHashMap<>();
+        RectF visible = new RectF(0, 0, preview.getWidth(), preview.getHeight());
         for (Text.TextBlock block : result.getTextBlocks()) {
             for (Text.Line line : block.getLines()) {
                 String value = line.getText().toUpperCase(Locale.ROOT);
@@ -399,35 +503,79 @@ public final class MainActivity extends ComponentActivity {
                     RectF bounds = boundsFor(line, value, matcher.start(), matcher.end());
                     if (bounds == null) continue;
                     transform.mapRect(bounds);
-                    if (!RectF.intersects(bounds, new RectF(0, 0, preview.getWidth(), preview.getHeight()))) continue;
-                    double distance = Math.abs(bounds.centerY() - preview.getHeight() / 2f);
-                    if (distance >= proximity) continue;
-                    hit = code;
-                    hitBounds = bounds;
-                    proximity = distance;
+                    if (RectF.intersects(bounds, visible)) hits.putIfAbsent(code, bounds);
                 }
             }
         }
-        if (hit.isEmpty()) {
+
+        reticle.mark(hits);
+        if (duplicate != null) return;
+        if (hits.isEmpty()) {
+            capturePanel.setVisibility(View.GONE);
             stableFrames = 0;
             if (++blankFrames >= 3) {
-                latched = "";
-                reticle.mark(null, GREEN);
+                latched.clear();
+                misses.clear();
+                multi.clear();
+                capturePanel.setVisibility(View.GONE);
                 cameraMessage.setText("Aim at a container number");
-                cameraMessage.setBackground(shape(0xe0241d37, 19));
+                cameraMessage.setBackground(shape(0xe0102e38, 19));
             }
             return;
         }
         blankFrames = 0;
-        if (!hit.equals(candidate)) { candidate = hit; stableFrames = 0; }
-        if (++stableFrames < 2) return;
-        if (!hit.equals(latched)) {
-            latched = hit;
-            reticle.mark(hitBounds, isRepeat(hit) ? RED : GREEN);
-            add(hit);
-        } else if (reticle.highlight != null) {
-            reticle.mark(hitBounds, reticle.color);
+        latched.removeIf(code -> {
+            if (hits.containsKey(code)) { misses.remove(code); return false; }
+            if (misses.merge(code, 1, Integer::sum) < 3) return false;
+            misses.remove(code);
+            return true;
+        });
+        if (!hits.keySet().equals(candidate)) {
+            candidate = new LinkedHashSet<>(hits.keySet());
+            stableFrames = 0;
         }
+        if (stableFrames < 3) stableFrames++;
+        if (stableFrames < 2) {
+            capturePanel.setVisibility(View.GONE);
+            return;
+        }
+        hits.keySet().removeAll(latched);
+        if (hits.isEmpty()) {
+            multi.clear();
+            capturePanel.setVisibility(View.GONE);
+            return;
+        }
+        if (hits.size() > 1 || !multi.isEmpty()) {
+            if (multi.isEmpty()) cameraMessage.performHapticFeedback(HapticFeedbackConstants.CONFIRM);
+            multi = hits;
+            captureMessage.setText(hits.size() + " ready · Capture one counts the number nearest the center.");
+            capturePanel.setVisibility(View.VISIBLE);
+            cameraMessage.setText("Choose which containers to count");
+            cameraMessage.setBackground(shape(0xe0102e38, 19));
+        } else if (stableFrames >= 3) {
+            String code = hits.keySet().iterator().next();
+            latched.add(code);
+            add(code);
+        }
+    }
+
+    private void capture(boolean all) {
+        if (multi.isEmpty() || duplicate != null || capturePanel.getVisibility() != View.VISIBLE) return;
+        ArrayList<String> chosen = new ArrayList<>(multi.keySet());
+        chosen.sort(java.util.Comparator.comparingDouble(code -> {
+            RectF rect = multi.get(code);
+            return Math.hypot(rect.centerX() - preview.getWidth()/2f, rect.centerY() - preview.getHeight()/2f);
+        }));
+        latched.addAll(multi.keySet());
+        multi.clear();
+        capturePanel.setVisibility(View.GONE);
+        if (!all) { add(chosen.get(0)); return; }
+        for (String code : chosen) {
+            if (isRepeat(code)) repeatQueue.add(code);
+            else save(code);
+        }
+        if (!repeatQueue.isEmpty()) add(repeatQueue.removeFirst());
+        else cameraMessage.setText(chosen.size() + " documents counted");
     }
 
     private RectF boundsFor(Text.Line line, String value, int start, int end) {
@@ -500,8 +648,9 @@ public final class MainActivity extends ComponentActivity {
         else {
             cameraMessage.setText("Ignored · " + code);
             cameraMessage.setBackground(shape(0xe0241d37, 19));
-            reticle.mark(null, GREEN);
+            reticle.mark(java.util.Collections.emptyMap());
         }
+        if (!repeatQueue.isEmpty()) add(repeatQueue.removeFirst());
     }
 
     private void save(String code) {
@@ -688,19 +837,78 @@ public final class MainActivity extends ComponentActivity {
     private void renderSettings() {
         LinearLayout account = card();
         account.addView(text("CPA Port Community System", 20, INK, true));
-        account.addView(text("Sign in on CPA’s own page. BSCA SB Scan reuses the session while it is valid.", 14, MUTED, false));
+        boolean configured = CpaAccount.configured(this);
+        account.addView(text(configured ? "Account saved on this device" : "Set up automatic sign-in or use the CPA website.", 14, MUTED, false));
+        space(account, 10);
+        EditText user = new EditText(this);
+        user.setHint("CPA username");
+        user.setSingleLine();
+        user.setAutofillHints(View.AUTOFILL_HINT_USERNAME);
+        account.addView(user);
+        EditText password = new EditText(this);
+        password.setHint("CPA password");
+        password.setSingleLine();
+        password.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        password.setAutofillHints(View.AUTOFILL_HINT_PASSWORD);
+        account.addView(password);
+        CheckBox encoded = new CheckBox(this);
+        encoded.setText("Use CPA’s encoded password field");
+        account.addView(encoded);
+        account.addView(text("Native login defaults to MD5. If CPA rejects it, use web sign-in or enter the exact encoded field.", 12, MUTED, false));
+        space(account, 9);
+        Button save = button("Save account & sign in", true, () -> {});
+        save.setOnClickListener(view -> {
+            String name = user.getText().toString().trim();
+            String secret = password.getText().toString();
+            boolean alreadyEncoded = encoded.isChecked();
+            if (name.isEmpty()) { user.setError("Enter your CPA username"); return; }
+            if (secret.isEmpty()) { password.setError("Enter your CPA password"); return; }
+            save.setEnabled(false);
+            save.setText("Signing in…");
+            accountExecutor.execute(() -> {
+                String message;
+                boolean signedIn = false;
+                try {
+                    CpaAccount.save(this, name, secret, alreadyEncoded);
+                    CpaAccount.signIn(this, CookieManager.getInstance().getCookie(Cpa.ROOT));
+                    signedIn = true;
+                    message = "CPA session saved · retrying pending lookups";
+                } catch (Cpa.Auth failure) {
+                    message = failure.getMessage();
+                } catch (Exception failure) {
+                    message = "Could not complete CPA sign-in. Try again or use web sign-in.";
+                }
+                String status = message;
+                boolean retry = signedIn;
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    password.setText("");
+                    save.setEnabled(true);
+                    save.setText("Save account & sign in");
+                    toast(status);
+                    if (retry && cpaWeb == null) retryPending();
+                });
+            });
+        });
+        account.addView(save);
         space(account, 7);
-        account.addView(button("Sign in to CPA", true, this::signIn));
+        account.addView(button("Open full-screen CPA sign-in", false, this::signIn));
         space(account, 7);
-        account.addView(button("Clear CPA session", false, () ->
-            CookieManager.getInstance().removeAllCookies(done -> {
-                CookieManager.getInstance().flush();
-                toast("CPA session cleared");
-            })));
+        account.addView(button("Clear saved account & session", false, () -> {
+            accountExecutor.execute(() -> {
+                CpaAccount.clear(this);
+                runOnUiThread(() -> CookieManager.getInstance().removeAllCookies(done -> {
+                    CookieManager.getInstance().flush();
+                    if (isFinishing() || isDestroyed()) return;
+                    toast("CPA account and session cleared");
+                    if (cpaWeb == null) render();
+                }));
+            });
+        }));
         space(content, 10);
         LinearLayout about = card();
         about.addView(text("About BSCA SB Scan", 20, INK, true));
-        about.addView(text("© 2026 BS Cargo Agency Ltd.\nAuthor · tas33n\nVersion 0.2 (2) · 23 November 2026", 14, MUTED, false));
+        about.addView(text("© 2026 BS Cargo Agency Ltd.\nAuthor · tas33n\nVersion " + BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ") · 23 November 2026", 14, MUTED, false));
         space(about, 8);
         about.addView(button("Source repository", false, () -> openLink("https://github.com/tas33n/HarborLens-Android")));
         space(about, 6);
@@ -713,7 +921,21 @@ public final class MainActivity extends ComponentActivity {
 
     @SuppressLint("SetJavaScriptEnabled")
     private void signIn() {
+        if (cpaWeb != null) return;
+        stopCamera();
+        LinearLayout screen = column();
+        screen.setBackgroundColor(BG);
+        screen.setPadding(dp(12), dp(8), dp(12), dp(8));
+        LinearLayout bar = new LinearLayout(this);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        screen.addView(bar);
+        bar.addView(button("Back", false, () -> closeWeb(false)));
+        TextView title = text("CPA sign-in", 18, INK, true);
+        title.setGravity(Gravity.CENTER);
+        bar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        bar.addView(button("Save session", true, () -> closeWeb(true)));
         WebView web = new WebView(this);
+        cpaWeb = web;
         web.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_YES);
         web.getSettings().setJavaScriptEnabled(true);
         web.getSettings().setDomStorageEnabled(true);
@@ -725,16 +947,26 @@ public final class MainActivity extends ComponentActivity {
                 return !"https".equals(uri.getScheme()) || !"cpatos.gov.bd".equalsIgnoreCase(uri.getHost());
             }
         });
+        screen.addView(web, new LinearLayout.LayoutParams(-1, 0, 1));
+        setContentView(screen);
         web.loadUrl(Cpa.LOGIN);
-        AlertDialog login = new AlertDialog.Builder(this).setTitle("Sign in on CPA")
-            .setView(web).setNegativeButton("Cancel", null)
-            .setPositiveButton("Retry pending lookups", (d, w) -> {
-                CookieManager.getInstance().flush();
-                retryPending();
-            }).create();
-        show(login);
-        login.setOnDismissListener(d -> { modal = false; web.destroy(); });
-        if (login.getWindow() != null) login.getWindow().setLayout(-1, -1);
+    }
+
+    private void closeWeb(boolean save) {
+        if (cpaWeb == null) return;
+        if (save) {
+            String cookies = CookieManager.getInstance().getCookie(Cpa.ROOT);
+            if (cookies == null || !cookies.contains("ci_session=")) {
+                toast("Sign in on CPA before saving");
+                return;
+            }
+            CookieManager.getInstance().flush();
+        }
+        WebView web = cpaWeb;
+        cpaWeb = null;
+        if (save) retryPending();
+        else render();
+        web.destroy();
     }
 
     private void persist() {
@@ -764,12 +996,20 @@ public final class MainActivity extends ComponentActivity {
 
     private final class Reticle extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private RectF highlight;
-        private int color = GREEN;
+        private final LinkedHashMap<String, RectF> highlights = new LinkedHashMap<>();
         Reticle() { super(MainActivity.this); }
-        void mark(RectF bounds, int tint) {
-            highlight = bounds == null ? null : new RectF(bounds);
-            color = tint;
+        void mark(Map<String, RectF> bounds) {
+            highlights.keySet().retainAll(bounds.keySet());
+            for (var entry : bounds.entrySet()) {
+                RectF next = entry.getValue();
+                RectF shown = highlights.get(entry.getKey());
+                if (shown == null || !RectF.intersects(shown, next)) {
+                    highlights.put(entry.getKey(), new RectF(next));
+                } else {
+                    shown.set(shown.left + (next.left - shown.left) * .8f, shown.top + (next.top - shown.top) * .8f,
+                        shown.right + (next.right - shown.right) * .8f, shown.bottom + (next.bottom - shown.bottom) * .8f);
+                }
+            }
             invalidate();
         }
         @Override protected void onDraw(Canvas canvas) {
@@ -780,7 +1020,7 @@ public final class MainActivity extends ComponentActivity {
             canvas.drawRect(0, bottom, getWidth(), getHeight(), paint);
             canvas.drawRect(0, top, left, bottom, paint);
             canvas.drawRect(right, top, getWidth(), bottom, paint);
-            paint.setColor(0xffe1d3ff);
+            paint.setColor(0xffe2f5f4);
             paint.setStrokeWidth(dp(3));
             float edge = dp(17);
             for (float x : new float[]{left, right}) {
@@ -789,15 +1029,17 @@ public final class MainActivity extends ComponentActivity {
                     canvas.drawLine(x, y, x, y + (y == top ? edge : -edge), paint);
                 }
             }
-            if (highlight != null) {
-                RectF outline = new RectF(highlight);
+            for (var hit : highlights.entrySet()) {
+                int color = hit.getKey().equals(duplicate) || (!latched.contains(hit.getKey()) && isRepeat(hit.getKey()))
+                    ? RED : GREEN;
+                RectF outline = new RectF(hit.getValue());
                 outline.inset(-dp(5), -dp(4));
                 paint.setColor((color & 0x00ffffff) | 0x44000000);
                 canvas.drawRoundRect(outline, dp(7), dp(7), paint);
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setColor(color);
+                paint.setStrokeWidth(1.25f * getResources().getDisplayMetrics().density);
                 canvas.drawRoundRect(outline, dp(7), dp(7), paint);
-                canvas.drawLine(outline.left, outline.bottom, outline.right, outline.bottom, paint);
                 paint.setStyle(Paint.Style.FILL);
             }
         }

@@ -20,7 +20,14 @@ public final class LookupWorker extends Worker {
         var store = getApplicationContext().getSharedPreferences(STORE, Context.MODE_PRIVATE);
         try {
             String cookie = CookieManager.getInstance().getCookie(Cpa.ROOT);
-            String[] row = Cpa.lookup(code, cookie);
+            String[] row;
+            try {
+                row = Cpa.lookup(code, cookie);
+            } catch (Cpa.Auth expired) {
+                if (!CpaAccount.configured(getApplicationContext())) throw expired;
+                String renewed = CpaAccount.signIn(getApplicationContext(), cookie);
+                row = Cpa.lookup(code, renewed);
+            }
             JSONArray json = new JSONArray();
             for (String value : row) json.put(value);
             return store.edit().putString(code, json.toString()).remove(code + "-error").commit()

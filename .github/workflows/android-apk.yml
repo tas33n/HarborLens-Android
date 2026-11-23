@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build Android APKs
 
 on:
   push:
@@ -9,9 +9,11 @@ permissions:
 
 jobs:
   build:
-    name: Build and verify debug APK
+    name: Build, sign and verify APKs
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      signing: ${{ steps.sign.outputs.mode }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -30,18 +32,112 @@ jobs:
         with:
           packages: "platforms;android-35 build-tools;35.0.0"
 
-      - name: Build debug APK
-        run: bash ./gradlew --no-daemon :app:assembleDebug
-
-      - name: Verify APK signature
+      - name: Build debug and release
         run: |
-          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:?Android SDK path is missing}}"
-          "$sdk_root/build-tools/35.0.0/apksigner" verify --verbose app/build/outputs/apk/debug/app-debug.apk
+          export BSCA_VERSION_CODE="$((GITHUB_RUN_NUMBER + 3))"
+          export BSCA_VERSION_NAME="0.4.${GITHUB_RUN_NUMBER}"
+          bash ./gradlew --no-daemon :app:assembleDebug :app:assembleRelease
 
-      - name: Upload APK
+      - name: Sign and verify APKs
+        id: sign
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:?Android SDK path is missing}}"
+          tools="$sdk_root/build-tools/35.0.0"
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/BSCA-SB-Scan-debug.apk
+
+          if [[ -n "$ANDROID_KEYSTORE_BASE64" ]]; then
+            : "${ANDROID_KEYSTORE_PASSWORD:?Missing ANDROID_KEYSTORE_PASSWORD}"
+            : "${ANDROID_KEY_ALIAS:?Missing ANDROID_KEY_ALIAS}"
+            : "${ANDROID_KEY_PASSWORD:?Missing ANDROID_KEY_PASSWORD}"
+            umask 077
+            keystore="$(mktemp "$RUNNER_TEMP/bsca-signing.XXXXXX")"
+            trap 'rm -f "$keystore"' EXIT
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+            mode=release-key
+          else
+            if [[ -n "$ANDROID_KEYSTORE_PASSWORD$ANDROID_KEY_ALIAS$ANDROID_KEY_PASSWORD" ]]; then
+              echo "::error::Release signing is incomplete. Set ANDROID_KEYSTORE_BASE64 as well."
+              exit 1
+            fi
+            keystore="$HOME/.android/debug.keystore"
+            ANDROID_KEY_ALIAS=androiddebugkey
+            export ANDROID_KEYSTORE_PASSWORD=android ANDROID_KEY_PASSWORD=android
+            mode=debug-key
+            echo "::warning::Release APK uses this runner's debug key. Configure release signing secrets for stable upgrades."
+          fi
+
+          "$tools/zipalign" -P 16 -f 4 app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/bsca-aligned.apk"
+          "$tools/apksigner" sign --ks "$keystore" --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
+            --out dist/BSCA-SB-Scan-release.apk "$RUNNER_TEMP/bsca-aligned.apk"
+          "$tools/apksigner" verify --verbose dist/BSCA-SB-Scan-debug.apk
+          "$tools/apksigner" verify --verbose dist/BSCA-SB-Scan-release.apk
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: BSCA-SB-Scan-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: BSCA-SB-Scan-APKs
+          path: dist/*.apk
           if-no-files-found: error
           retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out commit history
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Download verified APKs
+        uses: actions/download-artifact@v4
+        with:
+          name: BSCA-SB-Scan-APKs
+          path: dist
+
+      - name: Publish APKs and commit notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          SIGNING_MODE: ${{ needs.build.outputs.signing }}
+        run: |
+          set -euo pipefail
+          tag="v0.4.${GITHUB_RUN_NUMBER}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists."
+            exit 0
+          fi
+
+          notes="$RUNNER_TEMP/bsca-release-notes.md"
+          {
+            printf '## Changes\n\n'
+            if [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+              git log --reverse --format='- `%h` %s' "$BEFORE..$GITHUB_SHA"
+            else
+              git log -1 --format='- `%h` %s' "$GITHUB_SHA"
+            fi
+            printf '\n## APKs\n\n- **Debug** — diagnostics enabled.\n'
+            if [[ "$SIGNING_MODE" == release-key ]]; then
+              printf '%s\n' '- **Release** — signed with the configured release key.'
+            else
+              printf '%s\n' '- **Release** — release build signed with the runner’s debug key for testing. Future builds may require a fresh install.'
+            fi
+          } > "$notes"
+
+          gh release create "$tag" dist/BSCA-SB-Scan-debug.apk dist/BSCA-SB-Scan-release.apk \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "BSCA SB Scan $tag" --notes-file "$notes"
