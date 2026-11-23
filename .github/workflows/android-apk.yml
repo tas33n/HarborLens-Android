@@ -69,6 +69,14 @@ jobs:
             keystore="$HOME/.android/debug.keystore"
             ANDROID_KEY_ALIAS=androiddebugkey
             export ANDROID_KEYSTORE_PASSWORD=android ANDROID_KEY_PASSWORD=android
+            if [[ ! -f "$keystore" ]]; then
+              umask 077
+              mkdir -p "$(dirname "$keystore")"
+              keytool -genkeypair -noprompt -keystore "$keystore" -storetype JKS \
+                -storepass:env ANDROID_KEYSTORE_PASSWORD -keypass:env ANDROID_KEY_PASSWORD \
+                -alias "$ANDROID_KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
             mode=debug-key
             echo "::warning::Release APK uses this runner's debug key. Configure release signing secrets for stable upgrades."
           fi
@@ -86,58 +94,3 @@ jobs:
         with:
           name: BSCA-SB-Scan-APKs
           path: dist/*.apk
-          if-no-files-found: error
-          retention-days: 14
-
-  publish:
-    name: Publish GitHub Release
-    if: github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch
-    needs: build
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - name: Check out commit history
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      - name: Download verified APKs
-        uses: actions/download-artifact@v4
-        with:
-          name: BSCA-SB-Scan-APKs
-          path: dist
-
-      - name: Publish APKs and commit notes
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BEFORE: ${{ github.event.before }}
-          SIGNING_MODE: ${{ needs.build.outputs.signing }}
-        run: |
-          set -euo pipefail
-          tag="v0.4.${GITHUB_RUN_NUMBER}"
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $tag already exists."
-            exit 0
-          fi
-
-          notes="$RUNNER_TEMP/bsca-release-notes.md"
-          {
-            printf '## Changes\n\n'
-            if [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-              git log --reverse --format='- `%h` %s' "$BEFORE..$GITHUB_SHA"
-            else
-              git log -1 --format='- `%h` %s' "$GITHUB_SHA"
-            fi
-            printf '\n## APKs\n\n- **Debug** — diagnostics enabled.\n'
-            if [[ "$SIGNING_MODE" == release-key ]]; then
-              printf '%s\n' '- **Release** — signed with the configured release key.'
-            else
-              printf '%s\n' '- **Release** — release build signed with the runner’s debug key for testing. Future builds may require a fresh install.'
-            fi
-          } > "$notes"
-
-          gh release create "$tag" dist/BSCA-SB-Scan-debug.apk dist/BSCA-SB-Scan-release.apk \
-            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "BSCA SB Scan $tag" --notes-file "$notes"
