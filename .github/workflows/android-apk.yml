@@ -35,7 +35,7 @@ jobs:
       - name: Build debug and release
         run: |
           export BSCA_VERSION_CODE="$((GITHUB_RUN_NUMBER + 3))"
-          export BSCA_VERSION_NAME="0.8.${GITHUB_RUN_NUMBER}"
+          export BSCA_VERSION_NAME="0.10.${GITHUB_RUN_NUMBER}"
           bash ./gradlew --no-daemon :app:assembleDebug :app:assembleRelease
 
       - name: Sign and verify APKs
@@ -124,7 +124,7 @@ jobs:
           SIGNING_MODE: ${{ needs.build.outputs.signing }}
         run: |
           set -euo pipefail
-          tag="v0.8.${GITHUB_RUN_NUMBER}"
+          tag="v0.10.${GITHUB_RUN_NUMBER}"
           assets=(dist/BSCA-SB-Scan-debug.apk dist/BSCA-SB-Scan-release.apk)
           for asset in "${assets[@]}"; do
             if [[ ! -s "$asset" ]]; then

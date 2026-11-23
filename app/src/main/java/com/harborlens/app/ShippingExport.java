@@ -46,7 +46,16 @@ final class ShippingExport {
             }
         }
         if (document == null) throw new IllegalArgumentException("Template has no document body");
-        ArrayList<String[]> sheet = merge(document, additions);
+        var texts = document.getElementsByTagNameNS(W, "t");
+        for (int i = 0; i < texts.getLength(); i++) {
+            Node heading = texts.item(i);
+            String label = heading.getTextContent();
+            if (!label.contains("SHIPPING BILL LIST.") || !label.endsWith("DATE:")) continue;
+            var date = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Dhaka"));
+            heading.setTextContent(label + date.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.ROOT)));
+            break;
+        }
+        ArrayList<String[]> sheet = populate(document, additions);
         ByteArrayOutputStream word = new ByteArrayOutputStream();
         try (ZipInputStream input = new ZipInputStream(new ByteArrayInputStream(template));
              ZipOutputStream output = new ZipOutputStream(word)) {
@@ -64,62 +73,38 @@ final class ShippingExport {
         return new Files(word.toByteArray(), excel(sheet));
     }
 
-    private static ArrayList<String[]> merge(Document document, ArrayList<String[]> additions) {
+    private static ArrayList<String[]> populate(Document document, ArrayList<String[]> additions) {
         var tables = document.getElementsByTagNameNS(W, "tbl");
-        ArrayList<Element> rows = new ArrayList<>(), blanks = new ArrayList<>();
-        ArrayList<String[]> data = new ArrayList<>();
-        Element tail = null;
         for (int i = 0; i < tables.getLength(); i++) {
             Element table = (Element) tables.item(i);
-            var group = children(table, "tr");
-            if (group.isEmpty()) continue;
-            String[] header = values(group.get(0));
-            if (header.length != 7 || !header[1].equals("VSL NAME")) continue;
-            if (data.isEmpty()) data.add(header);
-            Element headerRow = group.get(0);
-            var properties = children(headerRow, "trPr");
+            var rows = children(table, "tr");
+            if (rows.size() != 2) continue;
+            Element header = rows.get(0);
+            String[] labels = values(header);
+            if (labels.length != 7 || !labels[1].equals("VSL NAME")) continue;
+            Element blank = rows.get(1);
+            if (children(blank, "tc").size() != labels.length) continue;
+            var properties = children(header, "trPr");
             Element prop = properties.isEmpty() ? document.createElementNS(W, "w:trPr") : properties.get(0);
-            if (properties.isEmpty()) headerRow.insertBefore(prop, headerRow.getFirstChild());
+            if (properties.isEmpty()) header.insertBefore(prop, header.getFirstChild());
             if (children(prop, "tblHeader").isEmpty()) prop.appendChild(document.createElementNS(W, "w:tblHeader"));
-            tail = table;
-            for (int j = 1; j < group.size(); j++) {
-                Element row = group.get(j);
-                String[] values = values(row);
-                if (values.length != 7) continue;
-                if (values[1].isEmpty()) blanks.add(row);
-                else {
-                    rows.add(row);
-                    data.add(values);
-                }
+
+            ArrayList<String[]> data = new ArrayList<>();
+            data.add(labels);
+            table.removeChild(blank);
+            for (String[] addition : additions) {
+                Element row = (Element) blank.cloneNode(true);
+                var cells = children(row, "tc");
+                for (int j = 1; j < labels.length; j++) set(cells.get(j), addition[j]);
+                set(cells.get(0), data.size() + ".");
+                table.appendChild(row);
+                String[] entry = addition.clone();
+                entry[0] = Integer.toString(data.size());
+                data.add(entry);
             }
+            return data;
         }
-        if (tail == null || blanks.isEmpty()) throw new IllegalArgumentException("Shipping table template not found");
-        Element prototype = (Element) blanks.get(0).cloneNode(true);
-        for (String[] addition : additions) {
-            int match = -1;
-            for (int i = 1; i < data.size(); i++) {
-                if (!key(data.get(i)).equals(key(addition))) continue;
-                if (match >= 0) { match = -1; break; }
-                match = i;
-            }
-            if (match >= 0 && data.get(match)[5].matches("[0-9]{1,8}")) {
-                String[] existing = data.get(match);
-                existing[5] = Long.toString(Long.parseLong(existing[5]) + Integer.parseInt(addition[5]));
-                set(children(rows.get(match - 1), "tc").get(5), existing[5]);
-                continue;
-            }
-            Element row = blanks.isEmpty() ? (Element) prototype.cloneNode(true) : blanks.remove(0);
-            if (row.getParentNode() == null) tail.appendChild(row);
-            var cells = children(row, "tc");
-            for (int j = 1; j < 7; j++) set(cells.get(j), addition[j]);
-            setDateFont(cells.get(4));
-            rows.add(row);
-            data.add(addition.clone());
-        }
-        for (int i = 1; i < data.size(); i++) {
-            if (data.get(i)[0].isEmpty()) data.get(i)[0] = Integer.toString(i);
-        }
-        return data;
+        throw new IllegalArgumentException("Shipping table template not found");
     }
 
     static String key(String[] row) {
@@ -159,26 +144,12 @@ final class ShippingExport {
         var paragraphs = children(cell, "p");
         Element paragraph = paragraphs.isEmpty() ? doc.createElementNS(W, "w:p") : paragraphs.get(0);
         if (paragraph.getParentNode() == null) cell.appendChild(paragraph);
-        Element run = doc.createElementNS(W, "w:r");
+        var runs = children(paragraph, "r");
+        Element run = runs.isEmpty() ? doc.createElementNS(W, "w:r") : runs.get(0);
         Element text = doc.createElementNS(W, "w:t");
         text.setTextContent(value);
         run.appendChild(text);
-        paragraph.appendChild(run);
-    }
-
-    private static void setDateFont(Element cell) {
-        var runs = cell.getElementsByTagNameNS(W, "r");
-        var doc = cell.getOwnerDocument();
-        for (int i = 0; i < runs.getLength(); i++) {
-            Element run = (Element) runs.item(i);
-            var existing = children(run, "rPr");
-            Element properties = existing.isEmpty() ? doc.createElementNS(W, "w:rPr") : existing.get(0);
-            if (existing.isEmpty()) run.insertBefore(properties, run.getFirstChild());
-            var sizes = children(properties, "sz");
-            Element size = sizes.isEmpty() ? doc.createElementNS(W, "w:sz") : sizes.get(0);
-            size.setAttributeNS(W, "w:val", "16");
-            if (sizes.isEmpty()) properties.appendChild(size);
-        }
+        if (run.getParentNode() == null) paragraph.appendChild(run);
     }
 
     private static byte[] bytes(InputStream in) throws Exception {
@@ -216,7 +187,7 @@ final class ShippingExport {
             part(zip, "_rels/.rels", "<Relationships xmlns=\"" + pkg + "\"><Relationship Id=\"rId1\" Type=\"" + rel + "/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>");
             part(zip, "xl/workbook.xml", "<workbook xmlns=\"" + S + "\" xmlns:r=\"" + rel + "\"><sheets><sheet name=\"Shipping Bill List\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>");
             part(zip, "xl/_rels/workbook.xml.rels", "<Relationships xmlns=\"" + pkg + "\"><Relationship Id=\"rId1\" Type=\"" + rel + "/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rId2\" Type=\"" + rel + "/styles\" Target=\"styles.xml\"/></Relationships>");
-            part(zip, "xl/styles.xml", "<styleSheet xmlns=\"" + S + "\"><fonts count=\"2\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font><font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts><fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills><borders count=\"1\"><border/></borders><cellStyleXfs count=\"1\"><xf/></cellStyleXfs><cellXfs count=\"2\"><xf xfId=\"0\"/><xf xfId=\"0\" fontId=\"1\" applyFont=\"1\"/></cellXfs><cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles></styleSheet>");
+            part(zip, "xl/styles.xml", "<styleSheet xmlns=\"" + S + "\"><fonts count=\"2\"><font><sz val=\"10\"/><name val=\"Times New Roman\"/></font><font><b/><sz val=\"10\"/><name val=\"Times New Roman\"/></font></fonts><fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills><borders count=\"1\"><border/></borders><cellStyleXfs count=\"1\"><xf/></cellStyleXfs><cellXfs count=\"2\"><xf xfId=\"0\" fontId=\"0\" applyFont=\"1\"/><xf xfId=\"0\" fontId=\"1\" applyFont=\"1\"/></cellXfs><cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles></styleSheet>");
             part(zip, "xl/worksheets/sheet1.xml", sheet.toString());
         }
         return file.toByteArray();
